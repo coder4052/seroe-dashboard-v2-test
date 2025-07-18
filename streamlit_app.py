@@ -16,7 +16,12 @@ import time
 import os  # USB 경로 확인용
 import contextlib
 import sys
-import psutil  # 메모리 모니터링용 (필요시)
+
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
 
 class MemoryManager:
     """메모리 관리 컨텍스트 매니저"""
@@ -43,13 +48,15 @@ class MemoryManager:
     @staticmethod
     def get_memory_usage():
         """현재 메모리 사용량 반환 (MB)"""
-        try:
-            import psutil
-            process = psutil.Process()
-            return process.memory_info().rss / 1024 / 1024
-        except:
-            # psutil이 없으면 대략적인 추정
-            return len(gc.get_objects()) * 0.001
+        if HAS_PSUTIL:
+            try:
+                process = psutil.Process()
+                return process.memory_info().rss / 1024 / 1024
+            except:
+                pass
+        
+        # psutil이 없으면 대략적인 추정
+        return len(gc.get_objects()) * 0.001
 
 def force_garbage_collection():
     """강제 가비지 컬렉션"""
