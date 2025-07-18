@@ -629,7 +629,7 @@ def check_admin_access():
         
         return True
 
-# 🔧 엑셀 파일 읽기 함수
+# 🔧 엑셀 파일 읽기 함수가 있던 곳
 def read_excel_file_safely(uploaded_file):
     """안전한 엑셀 파일 읽기 - 개선된 에러 처리"""
     df = None
@@ -643,13 +643,8 @@ def read_excel_file_safely(uploaded_file):
     for i, options in enumerate(read_options):
         try:
             # 파일 포인터 리셋
-            # 관리자 파일 업로드에서 최근 업로드된 파일 사용
-            if 'last_uploaded_file' in st.session_state and st.session_state.last_uploaded_file is not None:
-                st.session_state.last_uploaded_file.seek(0)
-                shipment_df = read_excel_file_safely(st.session_state.last_uploaded_file)
-            else:
-                st.warning("⚠️ 먼저 관리자 파일 업로드 섹션에서 출고내역서를 업로드해주세요.")
-                shipment_df = None
+            uploaded_file.seek(0)
+            df = pd.read_excel(uploaded_file, **options)
             
             if len(df) == 0:
                 st.warning(f"⚠️ {uploaded_file.name}: 파일이 비어있습니다")
