@@ -128,10 +128,7 @@ def safe_execute(func, error_message="처리 중 오류가 발생했습니다", 
             st.error(f"🔧 **오류 상세**: {str(e)}")
         logging.error(f"{error_message}: {str(e)}")
         return default_return
-2. 파일 처리 함수 강화
-위치: read_excel_file_safely 함수 수정 (약 430라인)
 
-python
 @handle_errors
 def read_excel_file_safely(uploaded_file):
     """안전한 엑셀 파일 읽기 - 강화된 에러 처리"""
