@@ -16,6 +16,9 @@ import time
 import os  # USB 경로 확인용
 import contextlib
 import sys
+from functools import wraps
+import traceback
+import logging
 
 try:
     import psutil
@@ -65,6 +68,129 @@ def force_garbage_collection():
         st.info(f"🗑️ 가비지 컬렉션: {collected}개 객체 정리")
     return collected
 
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('seroe_app.log'),
+        logging.StreamHandler()
+    ]
+)
+
+def handle_errors(func):
+    """에러 처리 데코레이터"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except FileNotFoundError as e:
+            st.error("❌ 파일을 찾을 수 없습니다.")
+            st.info("💡 파일 경로를 확인하고 다시 시도해주세요.")
+            logging.error(f"파일 없음: {str(e)}")
+            return None
+        except PermissionError as e:
+            st.error("❌ 파일 접근 권한이 없습니다.")
+            st.info("💡 파일이 다른 프로그램에서 열려있지 않은지 확인해주세요.")
+            logging.error(f"권한 오류: {str(e)}")
+            return None
+        except pd.errors.EmptyDataError as e:
+            st.error("❌ 파일이 비어있습니다.")
+            st.info("💡 올바른 엑셀 파일인지 확인해주세요.")
+            logging.error(f"빈 파일: {str(e)}")
+            return None
+        except requests.exceptions.RequestException as e:
+            st.error("❌ 네트워크 연결 오류가 발생했습니다.")
+            st.info("💡 인터넷 연결을 확인하고 다시 시도해주세요.")
+            logging.error(f"네트워크 오류: {str(e)}")
+            return None
+        except Exception as e:
+            st.error(f"❌ 예상치 못한 오류가 발생했습니다")
+            
+            # 관리자 모드에서는 상세 오류 표시
+            if st.session_state.get('admin_mode', False):
+                st.error("🔧 **관리자 전용 상세 오류:**")
+                st.code(f"{str(e)}\n\n{traceback.format_exc()}")
+            else:
+                st.info("💡 문제가 지속되면 관리자에게 문의하세요.")
+            
+            logging.error(f"예상치 못한 오류: {str(e)}\n{traceback.format_exc()}")
+            return None
+    return wrapper
+
+def safe_execute(func, error_message="처리 중 오류가 발생했습니다", default_return=None):
+    """안전한 함수 실행"""
+    try:
+        return func()
+    except Exception as e:
+        st.error(f"❌ {error_message}")
+        if st.session_state.get('admin_mode', False):
+            st.error(f"🔧 **오류 상세**: {str(e)}")
+        logging.error(f"{error_message}: {str(e)}")
+        return default_return
+2. 파일 처리 함수 강화
+위치: read_excel_file_safely 함수 수정 (약 430라인)
+
+python
+@handle_errors
+def read_excel_file_safely(uploaded_file):
+    """안전한 엑셀 파일 읽기 - 강화된 에러 처리"""
+    if uploaded_file is None:
+        st.error("❌ 업로드된 파일이 없습니다.")
+        return None
+    
+    # 파일 크기 확인
+    file_size = uploaded_file.size
+    if file_size > 50 * 1024 * 1024:  # 50MB 제한
+        st.error("❌ 파일 크기가 너무 큽니다. (최대 50MB)")
+        st.info("💡 파일 크기를 줄이거나 다른 파일을 선택해주세요.")
+        return None
+    
+    # 파일 확장자 확인
+    if not uploaded_file.name.lower().endswith('.xlsx'):
+        st.error("❌ .xlsx 파일만 지원합니다.")
+        st.info("💡 엑셀 파일을 .xlsx 형식으로 저장해주세요.")
+        return None
+    
+    df = None
+    read_options = [
+        {'engine': 'openpyxl', 'data_only': True},
+        {'engine': 'openpyxl', 'data_only': False},
+        {'engine': 'openpyxl'},
+    ]
+    
+    for i, options in enumerate(read_options):
+        try:
+            # 파일 포인터 리셋
+            uploaded_file.seek(0)
+            df = pd.read_excel(uploaded_file, **options)
+            
+            if len(df) == 0:
+                st.warning(f"⚠️ {uploaded_file.name}: 파일이 비어있습니다")
+                continue
+                
+            if i == 0:
+                st.success(f"✅ {uploaded_file.name}: 파일 읽기 성공 ({len(df):,}행)")
+            else:
+                st.info(f"ℹ️ {uploaded_file.name}: 대체 방식으로 읽기 성공 ({len(df):,}행)")
+            break
+            
+        except pd.errors.EmptyDataError:
+            st.error(f"❌ {uploaded_file.name}: 파일에 데이터가 없습니다")
+            continue
+        except pd.errors.ParserError as e:
+            st.error(f"❌ {uploaded_file.name}: 파일 형식 오류")
+            if i == len(read_options) - 1:
+                st.info("💡 파일이 손상되었거나 올바른 Excel 형식이 아닙니다.")
+            continue
+        except Exception as e:
+            if i == len(read_options) - 1:
+                st.error(f"❌ {uploaded_file.name}: 모든 읽기 방식 실패")
+                st.info("💡 파일을 다시 저장하거나 다른 파일을 시도해주세요.")
+                logging.error(f"파일 읽기 실패: {str(e)}")
+            continue
+    
+    return df
 
 # 한국 시간대 설정
 KST = timezone(timedelta(hours=9))
@@ -403,15 +529,33 @@ def check_duplicate_orders(new_orders, existing_df):
     
     return unique_orders
 
+@handle_errors
 def append_to_usb_customer_file(customer_orders, year):
-    """USB의 고객주문이력 파일에 새 주문들을 append"""
+    """USB의 고객주문이력 파일에 새 주문들을 append - 강화된 에러 처리"""
+    if not customer_orders:
+        st.info("💡 저장할 고객 주문이 없습니다.")
+        return False
+    
     try:
         # USB 연결 확인
         usb_connected, usb_path = check_usb_connection()
         if not usb_connected:
-            st.error("고객주문이력 파일이 담긴 USB를 삽입해주세요")
+            st.error("❌ USB를 찾을 수 없습니다.")
+            st.info("💡 고객주문이력 파일이 담긴 USB를 삽입해주세요.")
+            
+            # 복구 방법 제안
+            with st.expander("🔧 USB 연결 문제 해결 방법"):
+                st.markdown("""
+                **USB 연결 확인 사항:**
+                1. USB가 PC에 올바르게 연결되었는지 확인
+                2. 파일 탐색기에서 USB 드라이브가 보이는지 확인
+                3. USB 드라이브 문자(D:, E:, F: 등)가 할당되었는지 확인
+                4. 다른 USB 포트에 연결해보기
+                5. USB를 안전하게 제거 후 다시 연결하기
+                """)
+            
             return False
-        
+            
         # 파일 경로 생성
         file_path = get_usb_customer_history_path(usb_path, year)
         
@@ -455,9 +599,12 @@ def append_to_usb_customer_file(customer_orders, year):
             return False
             
     except Exception as e:
-        st.error(f"USB 연결이 끊어져서 에러가 발생했습니다: {str(e)}")
+        st.error(f"❌ USB 작업 중 예상치 못한 오류가 발생했습니다.")
+        if st.session_state.get('admin_mode', False):
+            st.error(f"🔧 **오류 상세**: {str(e)}")
+        logging.error(f"USB 작업 오류: {str(e)}")
         return False
-
+        
 def load_customer_order_history_from_usb(year):
     """USB에서 연도별 고객주문이력 불러오기"""
     try:
@@ -697,10 +844,27 @@ def check_admin_access():
         return True
 
 # 🔧 엑셀 파일 읽기 함수가 있던 곳
+@handle_errors
 def read_excel_file_safely(uploaded_file):
-    """안전한 엑셀 파일 읽기 - 개선된 에러 처리"""
-    df = None
+    """안전한 엑셀 파일 읽기 - 강화된 에러 처리"""
+    if uploaded_file is None:
+        st.error("❌ 업로드된 파일이 없습니다.")
+        return None
     
+    # 파일 크기 확인
+    file_size = uploaded_file.size
+    if file_size > 50 * 1024 * 1024:  # 50MB 제한
+        st.error("❌ 파일 크기가 너무 큽니다. (최대 50MB)")
+        st.info("💡 파일 크기를 줄이거나 다른 파일을 선택해주세요.")
+        return None
+    
+    # 파일 확장자 확인
+    if not uploaded_file.name.lower().endswith('.xlsx'):
+        st.error("❌ .xlsx 파일만 지원합니다.")
+        st.info("💡 엑셀 파일을 .xlsx 형식으로 저장해주세요.")
+        return None
+    
+    df = None
     read_options = [
         {'engine': 'openpyxl', 'data_only': True},
         {'engine': 'openpyxl', 'data_only': False},
@@ -718,16 +882,24 @@ def read_excel_file_safely(uploaded_file):
                 continue
                 
             if i == 0:
-                st.success(f"✅ {uploaded_file.name}: 최적화된 방식으로 읽기 성공")
+                st.success(f"✅ {uploaded_file.name}: 파일 읽기 성공 ({len(df):,}행)")
             else:
-                st.info(f"ℹ️ {uploaded_file.name}: 대체 방식으로 읽기 성공")
+                st.info(f"ℹ️ {uploaded_file.name}: 대체 방식으로 읽기 성공 ({len(df):,}행)")
             break
             
+        except pd.errors.EmptyDataError:
+            st.error(f"❌ {uploaded_file.name}: 파일에 데이터가 없습니다")
+            continue
+        except pd.errors.ParserError as e:
+            st.error(f"❌ {uploaded_file.name}: 파일 형식 오류")
+            if i == len(read_options) - 1:
+                st.info("💡 파일이 손상되었거나 올바른 Excel 형식이 아닙니다.")
+            continue
         except Exception as e:
             if i == len(read_options) - 1:
                 st.error(f"❌ {uploaded_file.name}: 모든 읽기 방식 실패")
-                st.error(f"오류 상세: {str(e)}")
-                st.info("💡 파일이 손상되었거나 올바른 Excel 형식이 아닐 수 있습니다.")
+                st.info("💡 파일을 다시 저장하거나 다른 파일을 시도해주세요.")
+                logging.error(f"파일 읽기 실패: {str(e)}")
             continue
     
     return df
@@ -1050,6 +1222,121 @@ def calculate_box_requirements(df):
             total_boxes[box_result] += 1
     
     return total_boxes, review_orders
+
+
+@handle_errors
+def process_uploaded_file_once(uploaded_file):
+    """파일을 한 번만 읽고 모든 처리에 재사용 - 강화된 에러 처리"""
+    if uploaded_file is None:
+        st.error("❌ 업로드된 파일이 없습니다.")
+        return None, None, None, None
+    
+    # 1. 파일 읽기
+    df = read_excel_file_safely(uploaded_file)
+    
+    if df is None:
+        st.error("❌ 파일 읽기에 실패했습니다.")
+        return None, None, None, None
+    
+    # 2. 데이터 유효성 검사
+    if df.empty:
+        st.error("❌ 파일에 데이터가 없습니다.")
+        st.info("💡 데이터가 포함된 엑셀 파일을 업로드해주세요.")
+        return None, None, None, None
+    
+    # 3. 필수 컬럼 확인
+    required_columns = ['상품이름', '옵션이름', '상품수량']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    
+    if missing_columns:
+        st.error(f"❌ 필수 컬럼이 누락되었습니다: {', '.join(missing_columns)}")
+        st.info("💡 올바른 출고내역서 파일인지 확인해주세요.")
+        
+        # 사용 가능한 컬럼 표시
+        available_columns = list(df.columns)
+        with st.expander("🔍 파일의 컬럼 목록 보기"):
+            st.write("현재 파일에 포함된 컬럼:")
+            for col in available_columns:
+                st.write(f"- {col}")
+        
+        return None, None, None, None
+    
+    # 4. 데이터 정제
+    try:
+        df_clean = sanitize_data(df)
+        
+        if df_clean.empty:
+            st.error("❌ 데이터 정제 후 사용 가능한 데이터가 없습니다.")
+            st.info("💡 데이터 형식을 확인하고 다시 시도해주세요.")
+            return None, None, None, None
+        
+        # 5. 복사본 생성
+        df_shipment = df_clean.copy()
+        df_box = df_clean.copy()
+        df_customer = df_clean.copy()
+        
+        st.success(f"✅ 파일 처리 완료: {len(df_clean):,}개 주문 준비됨")
+        
+        return df_clean, df_shipment, df_box, df_customer
+        
+    except Exception as e:
+        st.error(f"❌ 데이터 처리 중 오류가 발생했습니다.")
+        if st.session_state.get('admin_mode', False):
+            st.error(f"🔧 **오류 상세**: {str(e)}")
+        logging.error(f"데이터 처리 오류: {str(e)}")
+        return None, None, None, None
+
+@handle_errors
+def process_shipment_data(df):
+    """출고 현황 처리 - DataFrame을 직접 받아서 처리"""
+    try:
+        st.write(f"📄 출고 현황 처리 시작 (총 {len(df):,}개 주문)")
+        
+        results = defaultdict(int)
+        
+        # 프로그레스 바 추가
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        total_rows = len(df)
+        
+        for index, row in df.iterrows():
+            # 프로그레스 업데이트
+            progress = (index + 1) / total_rows
+            progress_bar.progress(progress)
+            status_text.text(f"출고 현황 처리 중... {index + 1:,}/{total_rows:,} ({progress:.1%})")
+            
+            option_product = extract_product_from_option(row.get('옵션이름', ''))
+            name_product = extract_product_from_name(row.get('상품이름', ''))
+            final_product = option_product if option_product != "기타" else name_product
+            
+            option_quantity, capacity = parse_option_info(row.get('옵션이름', ''))
+            
+            try:
+                base_quantity = int(row.get('상품수량', 1))
+            except (ValueError, TypeError):
+                base_quantity = 1
+                
+            total_quantity = base_quantity * option_quantity
+            
+            standardized_capacity = standardize_capacity(capacity)
+            
+            if standardized_capacity:
+                key = f"{final_product} {standardized_capacity}"
+            else:
+                key = final_product
+            
+            results[key] += total_quantity
+        
+        # 프로그레스 바 정리
+        progress_bar.empty()
+        status_text.empty()
+        
+        return results
+        
+    except Exception as e:
+        st.error(f"❌ 출고 현황 처리 중 오류: {str(e)}")
+        return {}
 
 def process_unified_file_optimized(uploaded_file):
     """최적화된 통합 파일 처리 - 메모리 효율적"""
