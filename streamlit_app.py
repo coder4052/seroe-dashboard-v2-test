@@ -14,6 +14,49 @@ from cryptography.fernet import Fernet
 import gc
 import time
 import os  # USB 경로 확인용
+import contextlib
+import sys
+import psutil  # 메모리 모니터링용 (필요시)
+
+class MemoryManager:
+    """메모리 관리 컨텍스트 매니저"""
+    
+    def __init__(self, description="메모리 관리", cleanup_vars=None):
+        self.description = description
+        self.cleanup_vars = cleanup_vars or []
+        self.initial_memory = None
+    
+    def __enter__(self):
+        self.initial_memory = self.get_memory_usage()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # 가비지 컬렉션 실행
+        collected = gc.collect()
+        
+        # 메모리 사용량 확인 (관리자 모드에서만)
+        if st.session_state.get('admin_mode', False):
+            final_memory = self.get_memory_usage()
+            memory_freed = self.initial_memory - final_memory
+            st.info(f"🧹 {self.description}: {collected}개 객체 정리, {memory_freed:.1f}MB 메모리 해제")
+    
+    @staticmethod
+    def get_memory_usage():
+        """현재 메모리 사용량 반환 (MB)"""
+        try:
+            import psutil
+            process = psutil.Process()
+            return process.memory_info().rss / 1024 / 1024
+        except:
+            # psutil이 없으면 대략적인 추정
+            return len(gc.get_objects()) * 0.001
+
+def force_garbage_collection():
+    """강제 가비지 컬렉션"""
+    collected = gc.collect()
+    if st.session_state.get('admin_mode', False):
+        st.info(f"🗑️ 가비지 컬렉션: {collected}개 객체 정리")
+    return collected
 
 
 # 한국 시간대 설정
@@ -260,44 +303,61 @@ def check_usb_connection():
             return True, path
     return False, None
 
-def extract_customer_order_from_shipment(df):
-    """출고내역서에서 고객주문정보 추출 (USB용)"""
-    customer_orders = []
-    
-    for _, row in df.iterrows():
-        order_date = row.get('주문일시', '')
-        if pd.isna(order_date):
-            continue
+#def extract_customer_order 있던 곳
+def extract_customer_order_from_shipment_optimized(df):
+    """메모리 효율적 고객 주문 이력 추출"""
+    with MemoryManager("고객 주문 추출") as mem:
+        customer_orders = []
+        
+        # 청크 단위로 처리
+        chunk_size = 500
+        total_rows = len(df)
+        
+        for start_idx in range(0, total_rows, chunk_size):
+            end_idx = min(start_idx + chunk_size, total_rows)
+            chunk = df.iloc[start_idx:end_idx]
             
-        try:
-            if isinstance(order_date, str):
-                order_datetime = pd.to_datetime(order_date)
-            else:
-                order_datetime = order_date
+            for _, row in chunk.iterrows():
+                order_date = row.get('주문일시', '')
+                if pd.isna(order_date):
+                    continue
+                
+                try:
+                    if isinstance(order_date, str):
+                        order_datetime = pd.to_datetime(order_date)
+                    else:
+                        order_datetime = order_date
+                    
+                    year = order_datetime.year
+                    
+                    customer_order = {
+                        '주문일시': order_datetime.strftime('%Y-%m-%d %H:%M:%S'),
+                        '상품이름': row.get('상품이름', ''),
+                        '옵션이름': row.get('옵션이름', ''),
+                        '상품수량': row.get('상품수량', 1),
+                        '상품결제금액': row.get('상품결제금액', 0),
+                        '주문자이름': row.get('주문자이름', ''),
+                        '주문자전화번호': row.get('주문자전화번호1', ''),
+                        '수취인이름': row.get('수취인이름', ''),
+                        '수취인우편번호': row.get('수취인우편번호', ''),
+                        '수취인주소': row.get('수취인주소', ''),
+                        '연도': year
+                    }
+                    
+                    customer_orders.append(customer_order)
+                    
+                except Exception as e:
+                    st.warning(f"주문일시 파싱 오류: {order_date} - {str(e)}")
+                    continue
             
-            year = order_datetime.year
+            # 청크 처리 완료 후 정리
+            del chunk
             
-            customer_order = {
-                '주문일시': order_datetime.strftime('%Y-%m-%d %H:%M:%S'),
-                '상품이름': row.get('상품이름', ''),
-                '옵션이름': row.get('옵션이름', ''),
-                '상품수량': row.get('상품수량', 1),
-                '상품결제금액': row.get('상품결제금액', 0),
-                '주문자이름': row.get('주문자이름', ''),
-                '주문자전화번호': row.get('주문자전화번호1', ''),
-                '수취인이름': row.get('수취인이름', ''),
-                '수취인우편번호': row.get('수취인우편번호', ''),
-                '수취인주소': row.get('수취인주소', ''),
-                '연도': year
-            }
-            
-            customer_orders.append(customer_order)
-            
-        except Exception as e:
-            st.warning(f"주문일시 파싱 오류: {order_date} - {str(e)}")
-            continue
-    
-    return customer_orders
+            # 주기적 가비지 컬렉션
+            if start_idx % (chunk_size * 3) == 0:
+                gc.collect()
+        
+        return customer_orders
 
 def create_customer_history_file(file_path):
     """고객주문정보 파일 생성 (헤더 포함)"""
@@ -984,72 +1044,82 @@ def calculate_box_requirements(df):
     
     return total_boxes, review_orders
 
-def process_unified_file(uploaded_file):
-    """통합 엑셀 파일 처리 - 출고 현황용 (개선된 메모리 관리)"""
-    try:
-        df = read_excel_file_safely(uploaded_file)
-        
-        if df is None:
-            return {}, []
-        
-        df = sanitize_data(df)
-        
-        if df.empty:
-            return {}, []
-        
-        st.write(f"📄 **{uploaded_file.name}**: 통합 파일 처리 시작 (총 {len(df):,}개 주문)")
-        
-        results = defaultdict(int)
-        
-        # 프로그레스 바 추가
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        total_rows = len(df)
-        
-        for index, row in df.iterrows():
-            # 프로그레스 업데이트
-            progress = (index + 1) / total_rows
-            progress_bar.progress(progress)
-            status_text.text(f"처리 중... {index + 1:,}/{total_rows:,} ({progress:.1%})")
+def process_unified_file_optimized(uploaded_file):
+    """최적화된 통합 파일 처리 - 메모리 효율적"""
+    with MemoryManager("통합 파일 처리") as mem:
+        try:
+            df = read_excel_file_safely(uploaded_file)
             
-            option_product = extract_product_from_option(row.get('옵션이름', ''))
-            name_product = extract_product_from_name(row.get('상품이름', ''))
-            final_product = option_product if option_product != "기타" else name_product
+            if df is None:
+                return {}, []
             
-            option_quantity, capacity = parse_option_info(row.get('옵션이름', ''))
+            df = sanitize_data(df)
             
-            try:
-                base_quantity = int(row.get('상품수량', 1))
-            except (ValueError, TypeError):
-                base_quantity = 1
+            if df.empty:
+                return {}, []
+            
+            st.write(f"📄 **{uploaded_file.name}**: 통합 파일 처리 시작 (총 {len(df):,}개 주문)")
+            
+            results = defaultdict(int)
+            
+            # 청크 단위로 처리 (메모리 절약)
+            chunk_size = 1000
+            total_rows = len(df)
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for start_idx in range(0, total_rows, chunk_size):
+                end_idx = min(start_idx + chunk_size, total_rows)
+                chunk = df.iloc[start_idx:end_idx]
                 
-            total_quantity = base_quantity * option_quantity
+                # 청크 처리
+                for index, row in chunk.iterrows():
+                    option_product = extract_product_from_option(row.get('옵션이름', ''))
+                    name_product = extract_product_from_name(row.get('상품이름', ''))
+                    final_product = option_product if option_product != "기타" else name_product
+                    
+                    option_quantity, capacity = parse_option_info(row.get('옵션이름', ''))
+                    
+                    try:
+                        base_quantity = int(row.get('상품수량', 1))
+                    except (ValueError, TypeError):
+                        base_quantity = 1
+                        
+                    total_quantity = base_quantity * option_quantity
+                    standardized_capacity = standardize_capacity(capacity)
+                    
+                    if standardized_capacity:
+                        key = f"{final_product} {standardized_capacity}"
+                    else:
+                        key = final_product
+                    
+                    results[key] += total_quantity
+                
+                # 프로그레스 업데이트
+                progress = end_idx / total_rows
+                progress_bar.progress(progress)
+                status_text.text(f"처리 중... {end_idx:,}/{total_rows:,} ({progress:.1%})")
+                
+                # 청크 처리 완료 후 메모리 정리
+                del chunk
+                if start_idx % (chunk_size * 5) == 0:  # 5개 청크마다 가비지 컬렉션
+                    gc.collect()
             
-            standardized_capacity = standardize_capacity(capacity)
+            # 프로그레스 바 정리
+            progress_bar.empty()
+            status_text.empty()
             
-            if standardized_capacity:
-                key = f"{final_product} {standardized_capacity}"
-            else:
-                key = final_product
+            processed_files = [f"통합 파일 ({len(df):,}개 주문)"]
             
-            results[key] += total_quantity
-        
-        # 프로그레스 바 정리
-        progress_bar.empty()
-        status_text.empty()
-        
-        processed_files = [f"통합 파일 ({len(df):,}개 주문)"]
-        
-        # 메모리 정리 추가
-        del df
-        gc.collect()
-        
-        return results, processed_files
-        
-    except Exception as e:
-        st.error(f"❌ {uploaded_file.name} 처리 중 오류: {str(e)}")
-        return {}, []
+            # DataFrame 삭제
+            del df
+            
+            return results, processed_files
+            
+        except Exception as e:
+            st.error(f"❌ {uploaded_file.name} 처리 중 오류: {str(e)}")
+            return {}, []
 
 def get_product_color(product_name):
     """상품명에 따른 색상 반환"""
@@ -1110,146 +1180,103 @@ if is_admin:
     )
     
     #if uploaded_file: 있던 곳
-    if uploaded_file:
-        # 세션 상태에 파일 저장
-        st.session_state.last_uploaded_file = uploaded_file
+if uploaded_file:
+    # 세션 상태에 파일 저장
+    st.session_state.last_uploaded_file = uploaded_file
 
+    # 메모리 관리와 함께 전체 처리
+    with MemoryManager("전체 파일 처리") as main_mem:
         with st.spinner('🔒 통합 파일 보안 처리 및 영구 저장 중...'):
-            # 출고 현황 처리 및 저장
-            df_clean, df_shipment, df_box, df_customer = process_uploaded_file_once(uploaded_file)
-            results = process_shipment_data(df_shipment)
-
-            def process_uploaded_file_once(uploaded_file):
-                """파일을 한 번만 읽고 모든 처리에 재사용"""
-                try:
-                    # 1. 파일을 한 번만 읽기
-                    df = read_excel_file_safely(uploaded_file)
+            # 1. 출고 현황 처리
+            with MemoryManager("출고 현황 처리") as shipment_mem:
+                df_clean, df_shipment, df_box, df_customer = process_uploaded_file_once(uploaded_file)
+                
+                if df_clean is not None:
+                    results = process_shipment_data(df_shipment)
+                    shipment_saved = save_shipment_data(results) if results else False
                     
-                    if df is None:
-                        return None, {}, {}, []
-                    
-                    # 2. 데이터 정제 (한 번만)
-                    df_clean = sanitize_data(df)
-                    
-                    if df_clean.empty:
-                        return None, {}, {}, []
-                    
-                    # 3. 각 처리용 복사본 생성 (필요한 경우에만)
-                    df_shipment = df_clean.copy()  # 출고 현황용
-                    df_box = df_clean.copy()       # 박스 계산용  
-                    df_customer = df_clean.copy()  # 고객 이력용
-                    
-                    return df_clean, df_shipment, df_box, df_customer
-                    
-                except Exception as e:
-                    st.error(f"❌ 파일 처리 중 오류: {str(e)}")
-                    return None, {}, {}, []
+                    # 즉시 메모리 정리
+                    del df_shipment, results
+                    gc.collect()
+                else:
+                    shipment_saved = False
             
-            def process_shipment_data(df):
-                """출고 현황 처리 - DataFrame을 직접 받아서 처리"""
-                try:
-                    st.write(f"📄 출고 현황 처리 시작 (총 {len(df):,}개 주문)")
+            # 2. 박스 계산 처리
+            with MemoryManager("박스 계산 처리") as box_mem:
+                if df_clean is not None:
+                    # 박스 계산용 DataFrame 생성
+                    df_box_calc = df_box.copy()
                     
-                    results = defaultdict(int)
-                    
-                    # 프로그레스 바 추가
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    total_rows = len(df)
-                    
-                    for index, row in df.iterrows():
-                        # 프로그레스 업데이트
-                        progress = (index + 1) / total_rows
-                        progress_bar.progress(progress)
-                        status_text.text(f"출고 현황 처리 중... {index + 1:,}/{total_rows:,} ({progress:.1%})")
+                    if not df_box_calc.empty and '수취인이름' in df_box_calc.columns:
+                        total_boxes, box_e_orders = calculate_box_requirements(df_box_calc)
                         
-                        option_product = extract_product_from_option(row.get('옵션이름', ''))
-                        name_product = extract_product_from_name(row.get('상품이름', ''))
-                        final_product = option_product if option_product != "기타" else name_product
+                        box_results = {
+                            'total_boxes': dict(total_boxes),
+                            'box_e_orders': [
+                                {
+                                    'recipient': order['recipient'],
+                                    'quantities': dict(order['quantities']),
+                                    'products': dict(order['products'])
+                                }
+                                for order in box_e_orders
+                            ]
+                        }
                         
-                        option_quantity, capacity = parse_option_info(row.get('옵션이름', ''))
+                        box_saved = save_box_data(box_results)
                         
-                        try:
-                            base_quantity = int(row.get('상품수량', 1))
-                        except (ValueError, TypeError):
-                            base_quantity = 1
+                        # 즉시 메모리 정리
+                        del total_boxes, box_e_orders, box_results
+                        gc.collect()
+                    else:
+                        box_saved = False
+                    
+                    # DataFrame 정리
+                    del df_box_calc, df_box
+                    gc.collect()
+                else:
+                    box_saved = False
+            
+            # 3. 고객 주문 이력 처리
+            with MemoryManager("고객 주문 이력 처리") as customer_mem:
+                if df_clean is not None:
+                    customer_orders = extract_customer_order_from_shipment(df_customer)
+                    
+                    if customer_orders:
+                        # 연도별 그룹화
+                        orders_by_year = {}
+                        for order in customer_orders:
+                            year = order['연도']
+                            if year not in orders_by_year:
+                                orders_by_year[year] = []
+                            orders_by_year[year].append(order)
+                        
+                        # 연도별 저장
+                        customer_saved = False
+                        for year, orders in orders_by_year.items():
+                            year_saved = append_to_usb_customer_file(orders, year)
+                            if year_saved:
+                                customer_saved = True
                             
-                        total_quantity = base_quantity * option_quantity
+                            # 처리 완료된 주문 즉시 삭제
+                            del orders
+                            gc.collect()
                         
-                        standardized_capacity = standardize_capacity(capacity)
-                        
-                        if standardized_capacity:
-                            key = f"{final_product} {standardized_capacity}"
-                        else:
-                            key = final_product
-                        
-                        results[key] += total_quantity
+                        # 전체 데이터 정리
+                        del customer_orders, orders_by_year
+                        gc.collect()
+                    else:
+                        customer_saved = False
                     
-                    # 프로그레스 바 정리
-                    progress_bar.empty()
-                    status_text.empty()
-                    
-                    return results
-                    
-                except Exception as e:
-                    st.error(f"❌ 출고 현황 처리 중 오류: {str(e)}")
-                    return {}
+                    # DataFrame 정리
+                    del df_customer
+                    gc.collect()
+                else:
+                    customer_saved = False
             
-            
-            # 박스 계산 처리
-            uploaded_file.seek(0)
-            df_for_box = read_excel_file_safely(uploaded_file)
-            box_results = {}
-            
-            if df_for_box is not None:
-                df_for_box = sanitize_data(df_for_box)
-                if not df_for_box.empty and '수취인이름' in df_for_box.columns:
-                    total_boxes, box_e_orders = calculate_box_requirements(df_for_box)
-                    
-                    box_results = {
-                        'total_boxes': dict(total_boxes),
-                        'box_e_orders': [
-                            {
-                                'recipient': order['recipient'],
-                                'quantities': dict(order['quantities']),
-                                'products': dict(order['products'])
-                            }
-                            for order in box_e_orders
-                        ]
-                    }
-            
-            # 고객주문이력 처리 추가가 있던 곳
-            # 🆕 고객주문이력 처리 추가
-            uploaded_file.seek(0)
-            df_for_customer = read_excel_file_safely(uploaded_file)
-            customer_saved = False
-
-            if df_for_customer is not None:
-                customer_orders = extract_customer_order_from_shipment(df_for_customer)
-                
-                if customer_orders:
-                    # 연도별로 그룹화
-                    orders_by_year = {}
-                    for order in customer_orders:
-                        year = order['연도']
-                        if year not in orders_by_year:
-                            orders_by_year[year] = []
-                        orders_by_year[year].append(order)
-                    
-                    # 연도별로 저장 (GitHub → USB로 변경)
-                    for year, orders in orders_by_year.items():
-                        year_saved = append_to_usb_customer_file(orders, year)
-                        if year_saved:
-                            customer_saved = True
-                
-                del df_for_customer
+            # 최종 DataFrame 정리
+            if df_clean is not None:
+                del df_clean
                 gc.collect()
-
-        
-        # 결과 표시 (기존 코드 수정)
-        shipment_saved = save_shipment_data(results) if results else False
-        box_saved = save_box_data(box_results) if box_results else False
         
         # 결과 표시
         if shipment_saved and box_saved and customer_saved:
@@ -1263,8 +1290,9 @@ if is_admin:
 
 # 첫 번째 탭: 출고 현황
 with tab1:
-    st.header("📦 출고 현황")
-    
+    with MemoryManager("출고 현황 탭") as tab_mem:
+        st.header("📦 출고 현황")
+        
     # 출고 현황 데이터 로드
     with st.spinner('📡 출고 현황 데이터 로드 중...'):
         shipment_results, shipment_last_update = load_shipment_data()
@@ -1393,8 +1421,9 @@ with tab1:
 
 # 두 번째 탭: 박스 계산
 with tab2:
-    st.header("📦 박스 개수 계산 결과")
-    
+    with MemoryManager("박스 계산 탭") as tab_mem:
+        st.header("📦 박스 개수 계산 결과")
+        
     # 박스 계산 데이터 로드
     with st.spinner('📡 박스 계산 데이터 로드 중...'):
         box_data, box_last_update = load_box_data()
@@ -1550,8 +1579,9 @@ with tab2:
 
 # 세 번째 탭: 재고 관리
 with tab3:
-    st.header("📊 재고 관리")
-    
+    with MemoryManager("재고 관리 탭") as tab_mem:
+        st.header("📊 재고 관리")
+        
     # 재고 데이터 로드
     with st.spinner('📡 재고 데이터 로드 중...'):
         stock_results, stock_last_update = load_stock_data()
@@ -1980,7 +2010,8 @@ with tab3:
 # 네 번째 탭: 고객 관리
 # 네 번째 탭: 고객 관리 (USB 기반)
 with tab4:
-    st.header("👥 고객 관리")
+    with MemoryManager("고객 관리 탭") as tab_mem:
+        st.header("👥 고객 관리")
     
     # 관리자 권한 확인
     if not is_admin:
@@ -2320,3 +2351,22 @@ with tab4:
 # 버전 정보
 st.markdown("---")
 st.markdown("**🔧 seroe-dashboard-v2** | ")
+
+def cleanup_session():
+    """세션 상태 정리"""
+    cleanup_keys = [
+        'last_uploaded_file',
+        'temp_data',
+        'processed_results'
+    ]
+    
+    for key in cleanup_keys:
+        if key in st.session_state:
+            del st.session_state[key]
+    
+    force_garbage_collection()
+
+# 앱 종료 시 정리
+import atexit
+atexit.register(cleanup_session)
+
