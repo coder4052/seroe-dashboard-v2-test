@@ -21,7 +21,7 @@ KST = timezone(timedelta(hours=9))
 
 # GitHub 설정 - 수정된 저장소명
 REPO_OWNER = "coder4052"  # 본인 GitHub 사용자명으로 변경하세요
-REPO_NAME = "seroe-dashboard-v2"  # 실제 생성한 저장소명
+REPO_NAME = "seroe-dashboard-v2-test"  # 실제 생성한 저장소명
 SHIPMENT_FILE_PATH = "data/출고현황_encrypted.json"
 BOX_FILE_PATH = "data/박스계산_encrypted.json"
 STOCK_FILE_PATH = "data/재고현황_encrypted.json"
