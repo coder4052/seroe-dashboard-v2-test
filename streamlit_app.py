@@ -1080,8 +1080,8 @@ def get_korean_date():
 
 # 메인 페이지 - 영구 저장 시스템
 korean_date = get_korean_date()
-st.title(f"🎯 서로별 관리 시스템 - {korean_date}")
-st.markdown("### 🔒 보안 강화 버전")
+st.title(f"🎯 테스트용 - {korean_date}")
+st.markdown("### 🔒 테스트 버전")
 
 # 관리자 권한 확인
 is_admin = check_admin_access()
