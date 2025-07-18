@@ -1470,114 +1470,266 @@ if is_admin:
         key="unified_file_uploader"
     )
     
-    #if uploaded_file: 있던 곳
-if uploaded_file:
-    # 세션 상태에 파일 저장
-    st.session_state.last_uploaded_file = uploaded_file
-
-    # 메모리 관리와 함께 전체 처리
-    with MemoryManager("전체 파일 처리") as main_mem:
-        with st.spinner('🔒 통합 파일 보안 처리 및 영구 저장 중...'):
-            # 1. 출고 현황 처리
-            with MemoryManager("출고 현황 처리") as shipment_mem:
-                df_clean, df_shipment, df_box, df_customer = process_uploaded_file_once(uploaded_file)
-                
-                if df_clean is not None:
-                    results = process_shipment_data(df_shipment)
-                    shipment_saved = save_shipment_data(results) if results else False
-                    
-                    # 즉시 메모리 정리
-                    del df_shipment, results
-                    gc.collect()
-                else:
-                    shipment_saved = False
-            
-            # 2. 박스 계산 처리
-            with MemoryManager("박스 계산 처리") as box_mem:
-                if df_clean is not None:
-                    # 박스 계산용 DataFrame 생성
-                    df_box_calc = df_box.copy()
-                    
-                    if not df_box_calc.empty and '수취인이름' in df_box_calc.columns:
-                        total_boxes, box_e_orders = calculate_box_requirements(df_box_calc)
-                        
-                        box_results = {
-                            'total_boxes': dict(total_boxes),
-                            'box_e_orders': [
-                                {
-                                    'recipient': order['recipient'],
-                                    'quantities': dict(order['quantities']),
-                                    'products': dict(order['products'])
-                                }
-                                for order in box_e_orders
-                            ]
-                        }
-                        
-                        box_saved = save_box_data(box_results)
-                        
-                        # 즉시 메모리 정리
-                        del total_boxes, box_e_orders, box_results
-                        gc.collect()
-                    else:
-                        box_saved = False
-                    
-                    # DataFrame 정리
-                    del df_box_calc, df_box
-                    gc.collect()
-                else:
-                    box_saved = False
-            
-            # 3. 고객 주문 이력 처리
-            with MemoryManager("고객 주문 이력 처리") as customer_mem:
-                if df_clean is not None:
-                    customer_orders = extract_customer_order_from_shipment(df_customer)
-                    
-                    if customer_orders:
-                        # 연도별 그룹화
-                        orders_by_year = {}
-                        for order in customer_orders:
-                            year = order['연도']
-                            if year not in orders_by_year:
-                                orders_by_year[year] = []
-                            orders_by_year[year].append(order)
-                        
-                        # 연도별 저장
-                        customer_saved = False
-                        for year, orders in orders_by_year.items():
-                            year_saved = append_to_usb_customer_file(orders, year)
-                            if year_saved:
-                                customer_saved = True
-                            
-                            # 처리 완료된 주문 즉시 삭제
-                            del orders
-                            gc.collect()
-                        
-                        # 전체 데이터 정리
-                        del customer_orders, orders_by_year
-                        gc.collect()
-                    else:
-                        customer_saved = False
-                    
-                    # DataFrame 정리
-                    del df_customer
-                    gc.collect()
-                else:
-                    customer_saved = False
-            
-            # 최종 DataFrame 정리
-            if df_clean is not None:
-                del df_clean
-                gc.collect()
+    if uploaded_file:
+        # 파일 유효성 사전 검사
+        if not uploaded_file.name.lower().endswith('.xlsx'):
+            st.error("❌ .xlsx 파일만 업로드 가능합니다.")
+            st.info("💡 엑셀 파일을 .xlsx 형식으로 저장해주세요.")
+            st.stop()
         
-        # 결과 표시
-        if shipment_saved and box_saved and customer_saved:
-            st.success("✅ 출고 현황, 박스 계산, 고객주문이력이 모두 영구 저장되었습니다!")
-        elif shipment_saved and box_saved:
-            st.success("✅ 출고 현황과 박스 계산 결과가 영구 저장되었습니다!")
-        elif customer_saved:
-            st.success("✅ 고객주문이력이 영구 저장되었습니다!")
-        else:
-            st.error("❌ 데이터 저장 중 오류가 발생했습니다.")
+        if uploaded_file.size > 50 * 1024 * 1024:  # 50MB 제한
+            st.error("❌ 파일 크기가 너무 큽니다. (최대 50MB)")
+            st.info("💡 파일 크기를 줄이거나 나누어서 업로드해주세요.")
+            st.stop()
+        
+        # 세션 상태에 파일 저장
+        st.session_state.last_uploaded_file = uploaded_file
+    
+        # 전체 처리를 안전하게 실행
+        def safe_process_all():
+            """전체 처리 과정을 안전하게 실행"""
+            success_count = 0
+            total_processes = 3
+            error_details = []
+            
+            # 메모리 관리와 함께 전체 처리
+            with MemoryManager("전체 파일 처리") as main_mem:
+                with st.spinner('🔒 통합 파일 보안 처리 및 영구 저장 중...'):
+                    # 1. 파일 전처리
+                    try:
+                        df_clean, df_shipment, df_box, df_customer = process_uploaded_file_once(uploaded_file)
+                        
+                        if df_clean is None:
+                            st.error("❌ 파일 처리에 실패했습니다.")
+                            st.info("💡 파일 형식이나 내용을 확인하고 다시 시도해주세요.")
+                            return False
+                        
+                        st.success(f"✅ 파일 전처리 완료: {len(df_clean):,}개 주문")
+                        
+                    except Exception as e:
+                        st.error("❌ 파일 전처리 중 치명적 오류가 발생했습니다.")
+                        if st.session_state.get('admin_mode', False):
+                            st.error(f"🔧 **오류 상세**: {str(e)}")
+                        logging.error(f"파일 전처리 오류: {str(e)}")
+                        return False
+                    
+                    # 2. 출고 현황 처리
+                    with MemoryManager("출고 현황 처리") as shipment_mem:
+                        try:
+                            with st.spinner('📦 출고 현황 처리 중...'):
+                                results = process_shipment_data(df_shipment)
+                                
+                                if results:
+                                    shipment_saved = save_shipment_data(results)
+                                    
+                                    if shipment_saved:
+                                        success_count += 1
+                                        st.success("✅ 출고 현황 저장 완료")
+                                    else:
+                                        st.warning("⚠️ 출고 현황 저장 실패")
+                                        error_details.append("출고 현황 GitHub 저장 실패")
+                                else:
+                                    st.warning("⚠️ 출고 현황 데이터 처리 실패")
+                                    error_details.append("출고 현황 데이터 없음")
+                                    shipment_saved = False
+                            
+                            # 즉시 메모리 정리
+                            del df_shipment, results
+                            gc.collect()
+                            
+                        except Exception as e:
+                            st.error("❌ 출고 현황 처리 중 오류가 발생했습니다.")
+                            if st.session_state.get('admin_mode', False):
+                                st.error(f"🔧 **오류 상세**: {str(e)}")
+                            logging.error(f"출고 현황 처리 오류: {str(e)}")
+                            error_details.append(f"출고 현황 처리 오류: {str(e)}")
+                            shipment_saved = False
+                    
+                    # 3. 박스 계산 처리
+                    with MemoryManager("박스 계산 처리") as box_mem:
+                        try:
+                            with st.spinner('📦 박스 계산 처리 중...'):
+                                if df_box is not None and not df_box.empty:
+                                    if '수취인이름' in df_box.columns:
+                                        total_boxes, box_e_orders = calculate_box_requirements(df_box)
+                                        
+                                        box_results = {
+                                            'total_boxes': dict(total_boxes),
+                                            'box_e_orders': [
+                                                {
+                                                    'recipient': order['recipient'],
+                                                    'quantities': dict(order['quantities']),
+                                                    'products': dict(order['products'])
+                                                }
+                                                for order in box_e_orders
+                                            ]
+                                        }
+                                        
+                                        box_saved = save_box_data(box_results)
+                                        
+                                        if box_saved:
+                                            success_count += 1
+                                            st.success("✅ 박스 계산 저장 완료")
+                                        else:
+                                            st.warning("⚠️ 박스 계산 저장 실패")
+                                            error_details.append("박스 계산 GitHub 저장 실패")
+                                        
+                                        # 즉시 메모리 정리
+                                        del total_boxes, box_e_orders, box_results
+                                        gc.collect()
+                                    else:
+                                        st.warning("⚠️ 박스 계산을 위한 '수취인이름' 컬럼이 없습니다.")
+                                        st.info("💡 박스 계산이 필요한 경우 수취인이름 컬럼이 포함된 파일을 업로드해주세요.")
+                                        box_saved = False
+                                        error_details.append("수취인이름 컬럼 없음")
+                                else:
+                                    st.warning("⚠️ 박스 계산용 데이터가 없습니다.")
+                                    box_saved = False
+                                    error_details.append("박스 계산용 데이터 없음")
+                            
+                            # DataFrame 정리
+                            if df_box is not None:
+                                del df_box
+                                gc.collect()
+                            
+                        except Exception as e:
+                            st.error("❌ 박스 계산 처리 중 오류가 발생했습니다.")
+                            if st.session_state.get('admin_mode', False):
+                                st.error(f"🔧 **오류 상세**: {str(e)}")
+                            logging.error(f"박스 계산 처리 오류: {str(e)}")
+                            error_details.append(f"박스 계산 처리 오류: {str(e)}")
+                            box_saved = False
+                    
+                    # 4. 고객 주문 이력 처리
+                    with MemoryManager("고객 주문 이력 처리") as customer_mem:
+                        try:
+                            with st.spinner('👥 고객 주문 이력 처리 중...'):
+                                if df_customer is not None and not df_customer.empty:
+                                    customer_orders = extract_customer_order_from_shipment(df_customer)
+                                    
+                                    if customer_orders:
+                                        # 연도별 그룹화
+                                        orders_by_year = {}
+                                        for order in customer_orders:
+                                            year = order['연도']
+                                            if year not in orders_by_year:
+                                                orders_by_year[year] = []
+                                            orders_by_year[year].append(order)
+                                        
+                                        # 연도별 저장
+                                        customer_saved = False
+                                        saved_years = []
+                                        
+                                        for year, orders in orders_by_year.items():
+                                            try:
+                                                year_saved = append_to_usb_customer_file(orders, year)
+                                                if year_saved:
+                                                    customer_saved = True
+                                                    saved_years.append(str(year))
+                                                
+                                                # 처리 완료된 주문 즉시 삭제
+                                                del orders
+                                                gc.collect()
+                                                
+                                            except Exception as year_error:
+                                                st.warning(f"⚠️ {year}년 고객 주문 저장 실패: {str(year_error)}")
+                                                error_details.append(f"{year}년 고객 주문 저장 실패")
+                                        
+                                        if customer_saved:
+                                            success_count += 1
+                                            st.success(f"✅ 고객 주문 이력 저장 완료 ({', '.join(saved_years)}년)")
+                                        else:
+                                            st.warning("⚠️ 고객 주문 이력 저장 실패")
+                                            error_details.append("모든 연도의 고객 주문 저장 실패")
+                                        
+                                        # 전체 데이터 정리
+                                        del customer_orders, orders_by_year
+                                        gc.collect()
+                                    else:
+                                        st.info("💡 저장할 고객 주문 이력이 없습니다.")
+                                        customer_saved = False
+                                else:
+                                    st.info("💡 고객 주문 이력 처리용 데이터가 없습니다.")
+                                    customer_saved = False
+                            
+                            # DataFrame 정리
+                            if df_customer is not None:
+                                del df_customer
+                                gc.collect()
+                            
+                        except Exception as e:
+                            st.error("❌ 고객 주문 이력 처리 중 오류가 발생했습니다.")
+                            if st.session_state.get('admin_mode', False):
+                                st.error(f"🔧 **오류 상세**: {str(e)}")
+                            logging.error(f"고객 주문 이력 처리 오류: {str(e)}")
+                            error_details.append(f"고객 주문 이력 처리 오류: {str(e)}")
+                            customer_saved = False
+                    
+                    # 최종 DataFrame 정리
+                    if df_clean is not None:
+                        del df_clean
+                        gc.collect()
+                    
+                    # 결과 요약 및 복구 가이드
+                    if success_count == total_processes:
+                        st.success("🎉 모든 처리가 성공적으로 완료되었습니다!")
+                        st.balloons()
+                    elif success_count > 0:
+                        st.warning(f"⚠️ {success_count}/{total_processes}개 처리가 완료되었습니다.")
+                        
+                        # 실패한 처리에 대한 복구 가이드
+                        if not shipment_saved:
+                            st.info("💡 **출고 현황 재시도**: 파일을 다시 업로드하거나 네트워크 연결을 확인해주세요.")
+                        if not box_saved:
+                            st.info("💡 **박스 계산 재시도**: 수취인이름 컬럼이 포함된 파일을 업로드해주세요.")
+                        if not customer_saved:
+                            st.info("💡 **고객 이력 재시도**: USB 연결을 확인하고 다시 시도해주세요.")
+                        
+                        # 관리자에게 상세 오류 정보 제공
+                        if st.session_state.get('admin_mode', False) and error_details:
+                            with st.expander("🔧 상세 오류 정보 (관리자 전용)"):
+                                for detail in error_details:
+                                    st.write(f"- {detail}")
+                    else:
+                        st.error("❌ 모든 처리가 실패했습니다.")
+                        st.info("💡 파일 형식, 네트워크 연결, USB 연결을 모두 확인해주세요.")
+                        
+                        # 복구 방법 제안
+                        with st.expander("🔧 문제 해결 방법"):
+                            st.markdown("""
+                            **파일 관련 문제:**
+                            1. 파일이 .xlsx 형식인지 확인
+                            2. 파일 크기가 50MB 이하인지 확인
+                            3. 필수 컬럼(상품이름, 옵션이름, 상품수량)이 있는지 확인
+                            
+                            **네트워크 관련 문제:**
+                            1. 인터넷 연결 상태 확인
+                            2. 잠시 후 다시 시도
+                            3. 브라우저 새로고침 후 재시도
+                            
+                            **USB 관련 문제:**
+                            1. USB가 올바르게 연결되었는지 확인
+                            2. 고객 정보 파일이 USB에 있는지 확인
+                            3. 다른 프로그램에서 파일을 사용 중이지 않은지 확인
+                            """)
+                        
+                        # 관리자에게 상세 오류 정보 제공
+                        if st.session_state.get('admin_mode', False) and error_details:
+                            with st.expander("🔧 상세 오류 정보 (관리자 전용)"):
+                                for detail in error_details:
+                                    st.write(f"- {detail}")
+                    
+                    return success_count > 0
+    
+        # 안전한 처리 실행
+        try:
+            safe_execute(safe_process_all, "전체 파일 처리", False)
+        except Exception as critical_error:
+            st.error("❌ 치명적인 시스템 오류가 발생했습니다.")
+            st.info("💡 페이지를 새로고침하고 다시 시도해주세요.")
+            if st.session_state.get('admin_mode', False):
+                st.error(f"🔧 **치명적 오류**: {str(critical_error)}")
+            logging.critical(f"치명적 시스템 오류: {str(critical_error)}")
 
 # 첫 번째 탭: 출고 현황
 with tab1:
