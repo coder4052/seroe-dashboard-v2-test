@@ -1116,7 +1116,86 @@ if is_admin:
 
         with st.spinner('🔒 통합 파일 보안 처리 및 영구 저장 중...'):
             # 출고 현황 처리 및 저장
-            results, processed_files = process_unified_file(uploaded_file)
+            df_clean, df_shipment, df_box, df_customer = process_uploaded_file_once(uploaded_file)
+            results = process_shipment_data(df_shipment)
+
+            def process_uploaded_file_once(uploaded_file):
+                """파일을 한 번만 읽고 모든 처리에 재사용"""
+                try:
+                    # 1. 파일을 한 번만 읽기
+                    df = read_excel_file_safely(uploaded_file)
+                    
+                    if df is None:
+                        return None, {}, {}, []
+                    
+                    # 2. 데이터 정제 (한 번만)
+                    df_clean = sanitize_data(df)
+                    
+                    if df_clean.empty:
+                        return None, {}, {}, []
+                    
+                    # 3. 각 처리용 복사본 생성 (필요한 경우에만)
+                    df_shipment = df_clean.copy()  # 출고 현황용
+                    df_box = df_clean.copy()       # 박스 계산용  
+                    df_customer = df_clean.copy()  # 고객 이력용
+                    
+                    return df_clean, df_shipment, df_box, df_customer
+                    
+                except Exception as e:
+                    st.error(f"❌ 파일 처리 중 오류: {str(e)}")
+                    return None, {}, {}, []
+            
+            def process_shipment_data(df):
+                """출고 현황 처리 - DataFrame을 직접 받아서 처리"""
+                try:
+                    st.write(f"📄 출고 현황 처리 시작 (총 {len(df):,}개 주문)")
+                    
+                    results = defaultdict(int)
+                    
+                    # 프로그레스 바 추가
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    total_rows = len(df)
+                    
+                    for index, row in df.iterrows():
+                        # 프로그레스 업데이트
+                        progress = (index + 1) / total_rows
+                        progress_bar.progress(progress)
+                        status_text.text(f"출고 현황 처리 중... {index + 1:,}/{total_rows:,} ({progress:.1%})")
+                        
+                        option_product = extract_product_from_option(row.get('옵션이름', ''))
+                        name_product = extract_product_from_name(row.get('상품이름', ''))
+                        final_product = option_product if option_product != "기타" else name_product
+                        
+                        option_quantity, capacity = parse_option_info(row.get('옵션이름', ''))
+                        
+                        try:
+                            base_quantity = int(row.get('상품수량', 1))
+                        except (ValueError, TypeError):
+                            base_quantity = 1
+                            
+                        total_quantity = base_quantity * option_quantity
+                        
+                        standardized_capacity = standardize_capacity(capacity)
+                        
+                        if standardized_capacity:
+                            key = f"{final_product} {standardized_capacity}"
+                        else:
+                            key = final_product
+                        
+                        results[key] += total_quantity
+                    
+                    # 프로그레스 바 정리
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                    return results
+                    
+                except Exception as e:
+                    st.error(f"❌ 출고 현황 처리 중 오류: {str(e)}")
+                    return {}
+            
             
             # 박스 계산 처리
             uploaded_file.seek(0)
