@@ -1084,6 +1084,104 @@ is_admin = check_admin_access()
 # 탭 구성
 tab1, tab2, tab3, tab4 = st.tabs(["📦 출고 현황", "📦 박스 계산", "📊 재고 관리", "👥 고객 관리"])
 
+# 관리자 파일 업로드
+if is_admin:
+    st.markdown("---")
+    st.markdown("## 👑 관리자 전용 - 통합 파일 업로드")
+    
+    st.info("""
+    🔒 **보안 정책**: 업로드된 엑셀 파일의 고객 개인정보는 즉시 제거되며, 집계 결과만 암호화되어 저장됩니다.
+    
+    📝 **영구 저장 시스템**:
+    - 출고 현황, 박스 계산, 재고 관리 결과가 모두 GitHub에 암호화되어 저장됩니다
+    - 로그아웃, 새로고침, 탭 닫기와 무관하게 지속적으로 표시됩니다
+    - 모든 팀원이 언제든지 최신 결과를 확인할 수 있습니다
+    - **출고 현황**: 200ml 그대로 표시
+    - **박스 계산**: 200ml을 240ml과 동일하게 처리
+    - **재고 관리**: 출고 현황과 자동 동기화
+    - **.xlsx 형식만 지원**
+    """)
+    
+    uploaded_file = st.file_uploader(
+        "📁 통합 엑셀 파일을 업로드하세요 (.xlsx만 지원)",
+        type=['xlsx'],
+        help="통합 출고내역서(.xlsx)를 업로드하세요. 고객 정보는 자동으로 제거됩니다.",
+        key="unified_file_uploader"
+    )
+    
+    #if uploaded_file: 있던 곳
+    if uploaded_file:
+        # 세션 상태에 파일 저장
+        st.session_state.last_uploaded_file = uploaded_file
+
+        with st.spinner('🔒 통합 파일 보안 처리 및 영구 저장 중...'):
+            # 출고 현황 처리 및 저장
+            results, processed_files = process_unified_file(uploaded_file)
+            
+            # 박스 계산 처리
+            uploaded_file.seek(0)
+            df_for_box = read_excel_file_safely(uploaded_file)
+            box_results = {}
+            
+            if df_for_box is not None:
+                df_for_box = sanitize_data(df_for_box)
+                if not df_for_box.empty and '수취인이름' in df_for_box.columns:
+                    total_boxes, box_e_orders = calculate_box_requirements(df_for_box)
+                    
+                    box_results = {
+                        'total_boxes': dict(total_boxes),
+                        'box_e_orders': [
+                            {
+                                'recipient': order['recipient'],
+                                'quantities': dict(order['quantities']),
+                                'products': dict(order['products'])
+                            }
+                            for order in box_e_orders
+                        ]
+                    }
+            
+            # 고객주문이력 처리 추가가 있던 곳
+            # 🆕 고객주문이력 처리 추가
+            uploaded_file.seek(0)
+            df_for_customer = read_excel_file_safely(uploaded_file)
+            customer_saved = False
+
+            if df_for_customer is not None:
+                customer_orders = extract_customer_order_from_shipment(df_for_customer)
+                
+                if customer_orders:
+                    # 연도별로 그룹화
+                    orders_by_year = {}
+                    for order in customer_orders:
+                        year = order['연도']
+                        if year not in orders_by_year:
+                            orders_by_year[year] = []
+                        orders_by_year[year].append(order)
+                    
+                    # 연도별로 저장 (GitHub → USB로 변경)
+                    for year, orders in orders_by_year.items():
+                        year_saved = append_to_usb_customer_file(orders, year)
+                        if year_saved:
+                            customer_saved = True
+                
+                del df_for_customer
+                gc.collect()
+
+        
+        # 결과 표시 (기존 코드 수정)
+        shipment_saved = save_shipment_data(results) if results else False
+        box_saved = save_box_data(box_results) if box_results else False
+        
+        # 결과 표시
+        if shipment_saved and box_saved and customer_saved:
+            st.success("✅ 출고 현황, 박스 계산, 고객주문이력이 모두 영구 저장되었습니다!")
+        elif shipment_saved and box_saved:
+            st.success("✅ 출고 현황과 박스 계산 결과가 영구 저장되었습니다!")
+        elif customer_saved:
+            st.success("✅ 고객주문이력이 영구 저장되었습니다!")
+        else:
+            st.error("❌ 데이터 저장 중 오류가 발생했습니다.")
+
 # 첫 번째 탭: 출고 현황
 with tab1:
     st.header("📦 출고 현황")
@@ -1876,7 +1974,6 @@ with tab4:
                         customer_df = pd.read_excel(customer_file_path)
                         
                         # 3. 출고 내역서에서 고객 정보 추출 및 매칭
-                        # 출고 내역서 다시 로드 (주문자 정보 포함)
                         # 관리자 파일 업로드에서 최근 업로드된 파일 사용
                         if 'last_uploaded_file' in st.session_state and st.session_state.last_uploaded_file is not None:
                             st.session_state.last_uploaded_file.seek(0)
@@ -2140,105 +2237,6 @@ with tab4:
     - 📊 재주문 확인 결과만 임시 표시
     - 🗑️ 처리 완료 후 모든 개인정보 자동 삭제
     """)
-
-# 관리자 파일 업로드 (tab4 밖에서)
-if is_admin:
-    st.markdown("---")
-    st.markdown("## 👑 관리자 전용 - 통합 파일 업로드")
-    
-    st.info("""
-    🔒 **보안 정책**: 업로드된 엑셀 파일의 고객 개인정보는 즉시 제거되며, 집계 결과만 암호화되어 저장됩니다.
-    
-    📝 **영구 저장 시스템**:
-    - 출고 현황, 박스 계산, 재고 관리 결과가 모두 GitHub에 암호화되어 저장됩니다
-    - 로그아웃, 새로고침, 탭 닫기와 무관하게 지속적으로 표시됩니다
-    - 모든 팀원이 언제든지 최신 결과를 확인할 수 있습니다
-    - **출고 현황**: 200ml 그대로 표시
-    - **박스 계산**: 200ml을 240ml과 동일하게 처리
-    - **재고 관리**: 출고 현황과 자동 동기화
-    - **.xlsx 형식만 지원**
-    """)
-    
-    uploaded_file = st.file_uploader(
-        "📁 통합 엑셀 파일을 업로드하세요 (.xlsx만 지원)",
-        type=['xlsx'],
-        help="통합 출고내역서(.xlsx)를 업로드하세요. 고객 정보는 자동으로 제거됩니다.",
-        key="unified_file_uploader"
-    )
-    
-    #if uploaded_file: 있던 곳
-    if uploaded_file:
-        # 세션 상태에 파일 저장
-        st.session_state.last_uploaded_file = uploaded_file
-
-        with st.spinner('🔒 통합 파일 보안 처리 및 영구 저장 중...'):
-            # 출고 현황 처리 및 저장
-            results, processed_files = process_unified_file(uploaded_file)
-            
-            # 박스 계산 처리
-            uploaded_file.seek(0)
-            df_for_box = read_excel_file_safely(uploaded_file)
-            box_results = {}
-            
-            if df_for_box is not None:
-                df_for_box = sanitize_data(df_for_box)
-                if not df_for_box.empty and '수취인이름' in df_for_box.columns:
-                    total_boxes, box_e_orders = calculate_box_requirements(df_for_box)
-                    
-                    box_results = {
-                        'total_boxes': dict(total_boxes),
-                        'box_e_orders': [
-                            {
-                                'recipient': order['recipient'],
-                                'quantities': dict(order['quantities']),
-                                'products': dict(order['products'])
-                            }
-                            for order in box_e_orders
-                        ]
-                    }
-            
-            # 고객주문이력 처리 추가가 있던 곳
-            # 🆕 고객주문이력 처리 추가
-            uploaded_file.seek(0)
-            df_for_customer = read_excel_file_safely(uploaded_file)
-            customer_saved = False
-
-            if df_for_customer is not None:
-                customer_orders = extract_customer_order_from_shipment(df_for_customer)
-                
-                if customer_orders:
-                    # 연도별로 그룹화
-                    orders_by_year = {}
-                    for order in customer_orders:
-                        year = order['연도']
-                        if year not in orders_by_year:
-                            orders_by_year[year] = []
-                        orders_by_year[year].append(order)
-                    
-                    # 연도별로 저장 (GitHub → USB로 변경)
-                    for year, orders in orders_by_year.items():
-                        year_saved = append_to_usb_customer_file(orders, year)
-                        if year_saved:
-                            customer_saved = True
-                
-                del df_for_customer
-                gc.collect()
-
-        
-        # 결과 표시 (기존 코드 수정)
-        shipment_saved = save_shipment_data(results) if results else False
-        box_saved = save_box_data(box_results) if box_results else False
-        
-        # 결과 표시
-        if shipment_saved and box_saved and customer_saved:
-            st.success("✅ 출고 현황, 박스 계산, 고객주문이력이 모두 영구 저장되었습니다!")
-        elif shipment_saved and box_saved:
-            st.success("✅ 출고 현황과 박스 계산 결과가 영구 저장되었습니다!")
-        elif customer_saved:
-            st.success("✅ 고객주문이력이 영구 저장되었습니다!")
-        else:
-            st.error("❌ 데이터 저장 중 오류가 발생했습니다.")
-
 
 # 버전 정보
 st.markdown("---")
